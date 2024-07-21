@@ -10,33 +10,33 @@ import pyperclip
 from cryptography.fernet import Fernet, InvalidToken
 
 class PasswordManager:
-    def __init__(self, key=None):
-        self.key = None
-        self.cipher = None
+    def __init__(self):
+        self.keys = {}
+        self.current_key_id = None
         self.file_path = 'passwords.json'
         self.passwords = {}
-        if key:
-            self.set_key(key)
     
-    def set_key(self, key):
-        """Set the encryption key."""
-        self.key = self.generate_fernet_key(key)
-        self.cipher = Fernet(self.key)
+    def set_key(self, key, key_id):
+        """Set the encryption key with a given key ID."""
+        self.keys[key_id] = self.generate_fernet_key(key)
+        self.current_key_id = key_id
         self.passwords = self.load_passwords()
-    
+
     def generate_fernet_key(self, user_key):
         """Generate a valid Fernet key from the user-provided key."""
         digest = hashlib.sha256(user_key.encode()).digest()
         return base64.urlsafe_b64encode(digest)
 
-    def encrypt_password(self, password):
-        """Encrypt a password."""
-        return self.cipher.encrypt(password.encode()).decode()
+    def encrypt_password(self, password, key_id):
+        """Encrypt a password with the key identified by key_id."""
+        cipher = Fernet(self.keys[key_id])
+        return cipher.encrypt(password.encode()).decode()
 
-    def decrypt_password(self, encrypted_password):
-        """Decrypt a password."""
+    def decrypt_password(self, encrypted_password, key_id):
+        """Decrypt a password with the key identified by key_id."""
         try:
-            return self.cipher.decrypt(encrypted_password.encode()).decode()
+            cipher = Fernet(self.keys[key_id])
+            return cipher.decrypt(encrypted_password.encode()).decode()
         except (InvalidToken, ValueError, TypeError):
             return "Decryption failed"
 
@@ -46,18 +46,31 @@ class PasswordManager:
             with open(self.file_path, 'r') as file:
                 encrypted_passwords = json.load(file)
                 decrypted_passwords = {}
-                for account, encrypted_pwd in encrypted_passwords.items():
-                    try:
-                        decrypted_passwords[account] = self.decrypt_password(encrypted_pwd)
-                    except Exception as e:
-                        print(f"Failed to decrypt password for {account}: {e}")
-                        decrypted_passwords[account] = "Decryption failed"
+                for account, data in encrypted_passwords.items():
+                    key_id = data['key_id']
+                    encrypted_pwd = data['password']
+                    if key_id in self.keys:
+                        decrypted_passwords[account] = {
+                            'password': self.decrypt_password(encrypted_pwd, key_id),
+                            'key_id': key_id
+                        }
+                    else:
+                        decrypted_passwords[account] = {
+                            'password': "Key not found",
+                            'key_id': key_id
+                        }
                 return decrypted_passwords
         return {}
     
     def save_passwords(self):
         """Encrypt and save passwords to the file."""
-        encrypted_passwords = {account: self.encrypt_password(pwd) for account, pwd in self.passwords.items()}
+        encrypted_passwords = {
+            account: {
+                'password': self.encrypt_password(data['password'], data['key_id']),
+                'key_id': data['key_id']
+            }
+            for account, data in self.passwords.items()
+        }
         with open(self.file_path, 'w') as file:
             json.dump(encrypted_passwords, file)
     
@@ -83,13 +96,13 @@ class PasswordManager:
             return "Account already exists"
         if not password:
             password = self.generate_password(length)
-        self.passwords[account] = password
+        self.passwords[account] = {'password': password, 'key_id': self.current_key_id}
         self.save_passwords()
         return password
     
     def get_password(self, account):
         """Retrieve the password for an account."""
-        return self.passwords.get(account, "Account not found")
+        return self.passwords.get(account, {"password": "Account not found"})['password']
     
     def update_password(self, account, password=None, length=16):
         """Update the password for an account."""
@@ -97,7 +110,7 @@ class PasswordManager:
             return "Account not found"
         if not password:
             password = self.generate_password(length)
-        self.passwords[account] = password
+        self.passwords[account]['password'] = password
         self.save_passwords()
         return password
     
@@ -118,13 +131,25 @@ class PasswordManager:
         """Import passwords from a JSON file."""
         with open(filepath, 'r') as file:
             imported_passwords = json.load(file)
-            for account, encrypted_pwd in imported_passwords.items():
-                self.passwords[account] = self.decrypt_password(encrypted_pwd)
+            for account, data in imported_passwords.items():
+                key_id = data['key_id']
+                encrypted_pwd = data['password']
+                if key_id in self.keys:
+                    self.passwords[account] = {
+                        'password': self.decrypt_password(encrypted_pwd, key_id),
+                        'key_id': key_id
+                    }
             self.save_passwords()
     
     def export_passwords(self, filepath):
         """Export passwords to a JSON file."""
-        encrypted_passwords = {account: self.encrypt_password(pwd) for account, pwd in self.passwords.items()}
+        encrypted_passwords = {
+            account: {
+                'password': self.encrypt_password(data['password'], data['key_id']),
+                'key_id': data['key_id']
+            }
+            for account, data in self.passwords.items()
+        }
         with open(filepath, 'w') as file:
             json.dump(encrypted_passwords, file)
 
@@ -213,8 +238,9 @@ class PasswordManagerGUI(tk.Tk):
 
     def set_encryption_key(self):
         key = self.show_dialog("Enter Encryption Key", "Encryption Key:")
-        if key:
-            self.pm.set_key(key)
+        key_id = self.show_dialog("Enter Key ID", "Key ID:")
+        if key and key_id:
+            self.pm.set_key(key, key_id)
             self.update_password_list()
 
     def update_password_list(self):
@@ -244,7 +270,7 @@ class PasswordManagerGUI(tk.Tk):
         self.after(3000, lambda: label.config(text="*" * len(password)))
 
     def add_password(self):
-        if not self.pm.key:
+        if not self.pm.current_key_id:
             messagebox.showerror("Error", "Please enter the encryption key first.")
             return
         account = self.show_dialog("Add Password", "Account Name:")
@@ -255,7 +281,7 @@ class PasswordManagerGUI(tk.Tk):
             length = self.show_integer_dialog("Add Password", "Password Length:", 16)
             if length:
                 if length < 16:
-                    messagebox.showwarning("Invalid Length", "According to cyber security in UDH, you are not allowed to use less than 16 characters.")
+                    messagebox.showwarning("Invalid Length", "Password length should be at least 16 characters.")
                     return
                 password = self.pm.add_password(account, length=length)
                 if password == "Account already exists":
@@ -266,7 +292,7 @@ class PasswordManagerGUI(tk.Tk):
                 self.update_password_list()
 
     def get_password(self):
-        if not self.pm.key:
+        if not self.pm.current_key_id:
             messagebox.showerror("Error", "Please enter the encryption key first.")
             return
         account = self.show_dialog("Get Password", "Account Name:")
@@ -276,7 +302,7 @@ class PasswordManagerGUI(tk.Tk):
             messagebox.showinfo("Password Retrieved", f"Password for {account}: {password}\n(Copied to clipboard)")
 
     def update_password(self):
-        if not self.pm.key:
+        if not self.pm.current_key_id:
             messagebox.showerror("Error", "Please enter the encryption key first.")
             return
         account = self.show_dialog("Update Password", "Account Name:")
@@ -288,7 +314,7 @@ class PasswordManagerGUI(tk.Tk):
                 length = self.show_integer_dialog("Update Password", "Password Length:", 16)
                 if length:
                     if length < 16:
-                        messagebox.showwarning("Invalid Length", "According to cyber security in UDH, you are not allowed to use less than 16 characters.")
+                        messagebox.showwarning("Invalid Length", "Password length should be at least 16 characters.")
                         return
                     password = self.pm.update_password(account, length=length)
                     pyperclip.copy(password)
@@ -296,7 +322,7 @@ class PasswordManagerGUI(tk.Tk):
                     self.update_password_list()
 
     def delete_password(self):
-        if not self.pm.key:
+        if not self.pm.current_key_id:
             messagebox.showerror("Error", "Please enter the encryption key first.")
             return
         account = self.show_dialog("Delete Password", "Account Name:")
@@ -307,7 +333,7 @@ class PasswordManagerGUI(tk.Tk):
                 self.update_password_list()
 
     def list_accounts(self):
-        if not self.pm.key:
+        if not self.pm.current_key_id:
             messagebox.showerror("Error", "Please enter the encryption key first.")
             return
         accounts = self.pm.list_accounts()
@@ -318,7 +344,7 @@ class PasswordManagerGUI(tk.Tk):
             self.show_accounts_dialog("List of Accounts", accounts_str)
 
     def import_passwords(self):
-        if not self.pm.key:
+        if not self.pm.current_key_id:
             messagebox.showerror("Error", "Please enter the encryption key first.")
             return
         file_path = filedialog.askopenfilename(title="Import Passwords", filetypes=[("JSON Files", "*.json")])
@@ -328,7 +354,7 @@ class PasswordManagerGUI(tk.Tk):
             self.update_password_list()
 
     def export_passwords(self):
-        if not self.pm.key:
+        if not self.pm.current_key_id:
             messagebox.showerror("Error", "Please enter the encryption key first.")
             return
         file_path = filedialog.asksaveasfilename(title="Export Passwords", defaultextension=".json", filetypes=[("JSON Files", "*.json")])
